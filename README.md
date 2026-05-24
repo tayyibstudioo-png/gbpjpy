@@ -104,3 +104,109 @@ that's about **0.15 lots**. The lot scales with the account.
 - Live **stats panel** on the chart (today's signals, running win rate, RR).
 
 Just ask.
+
+---
+
+# GBPJPY S/R Break & Retest — MQL5 Indicator (v2.0)
+
+A second, **structure-based** indicator that lives in
+`Indicators/GBPJPY_SR_BreakRetest.mq5`. Designed to draw **only the
+major support / resistance zones** and target roughly **2 high-quality
+break-and-retest setups per day**.
+
+## Why v2 (and what's wrong with v1)
+
+v1 scanned M15 swing pivots with a 2-touch minimum and a loose 0.45×ATR
+cluster. On a chop day on GBPJPY that produced 12+ tiny zones that all
+got broken — meaningless noise.
+
+**v2 fixes this with four levers:**
+
+1. Pivots are pulled from a **higher timeframe** (H1 by default), so
+   only real swings count.
+2. A zone needs **at least 3 separate touches** to qualify as a
+   rejection area.
+3. Cluster tolerance is tighter (**0.30×ATR**) so zones stay sharp.
+4. Only the **closest 2 zones above and 2 zones below** the current
+   price are kept — total of 4 lines on the chart.
+
+## What it does
+
+1. Pulls the last `InpHTFBars` H1 candles and finds swing highs / lows
+   with ≥ `InpPivotStrength` bars on each side.
+2. Clusters nearby pivots into zones; drops anything with fewer than
+   `InpMinTouches`.
+3. Filters out zones not touched recently (`InpRecencyHTFBars`) and
+   zones too far from price (`InpMaxDistanceATR`).
+4. Keeps only the top-N strongest above and below the current price.
+5. On the **chart timeframe**, watches each zone for:
+   - a decisive break (close beyond by ≥ `InpBreakATRMult × ATR`), then
+   - a return into the zone within `InpRetestMaxBars`, then
+   - a **strong** rejection candle (pin or engulfing, body < 35% range)
+     closing back in the breakout direction.
+6. On confirmation: green up-arrow (long) or red down-arrow (short),
+   plus a popup alert.
+
+## Zone colors
+
+| Color | Meaning |
+|-------|---------|
+| Red rectangle (solid) | Active resistance (≥ 3 touches above price) |
+| Green rectangle (solid) | Active support (≥ 3 touches below price) |
+| Orange rectangle (dashed) | Recently broken, **pending retest** |
+| Hidden | Broken zones whose retest window has expired |
+
+The label on the right of each zone shows: `RES / SUP / RETEST? /
+RETESTED`, the zone midpoint price, and the touch count.
+
+## Recommended inputs by trading style
+
+| Style | Chart TF | `InpZoneTF` | `InpPivotStrength` | `InpMinTouches` | Expected signals/day |
+|-------|----------|-------------|--------------------|----|----|
+| Scalp | M5  | M30 | 4 | 3 | 3–5 |
+| **Intraday (default)** | **M15** | **H1** | **5** | **3** | **~2** |
+| Swing | H1  | H4  | 5 | 3 | 0–1 |
+
+## How to trade the arrows
+
+1. Wait for an arrow on a **closed bar** — never act on a forming candle.
+2. **Entry** = arrow bar close.
+3. **SL** = below the swing low (long) / above the swing high (short),
+   plus a 0.2 × ATR buffer.
+4. **TP** = 1.5R, scaling in is optional.
+5. Risk **fixed 1% of equity** per trade. No martingale.
+6. Skip the trade if a red-folder news event is within the next 30 min
+   (BOE / BOJ / US CPI / NFP / FOMC).
+7. Move SL to break-even at +0.7R; close half at +1R if you want.
+
+## Stacking with Perfect Entry
+
+Drop both indicators on the same GBPJPY M15 chart. The A+ trade is when:
+
+- A Perfect Entry arrow prints **inside or right next to** an
+  S/R Break-and-Retest arrow, **and**
+- That zone is one of the 4 majors drawn by v2.
+
+When both fire on the same bar, that's structure + trend + momentum
+all aligned — exactly the kind of trade you want to size up to a full
+1% on.
+
+## Install
+
+1. Copy `Indicators/GBPJPY_SR_BreakRetest.mq5` into MT5's
+   `MQL5/Indicators/` folder.
+2. Press **F4** in MT5 to open MetaEditor, then **F7** to compile
+   (no errors expected).
+3. Drag the indicator on a GBPJPY M15 chart. Press OK.
+4. Optionally drag `GBPJPY_PerfectEntry` on the same chart for the A+
+   stack.
+
+## Tuning if you see too few / too many signals
+
+| Symptom | Adjustment |
+|---|---|
+| Zero arrows for a week | Lower `InpMinTouches` to 2, or `InpPivotStrength` to 4 |
+| More than 3 signals per day | Raise `InpMinTouches` to 4, or `InpZoneTF` to H4 |
+| Zones look too wide | Reduce `InpClusterATRMult` to 0.20 |
+| Zones look too thin / miss obvious levels | Raise `InpClusterATRMult` to 0.40 |
+| Chart too cluttered | Reduce `InpZonesAbovePrice` and `InpZonesBelowPrice` to 1 each |
