@@ -1,23 +1,25 @@
 //+------------------------------------------------------------------+
 //|                                    GBPJPY_SR_BreakRetest.mq5     |
-//|             v1.0 - SUPPORT/RESISTANCE + BREAK & RETEST INDICATOR |
+//|        v2.0 - MAJOR ZONES ONLY - 2 SETUPS / DAY TARGET           |
 //|                                                                  |
-//|  Auto-detects support / resistance zones from swing pivots,      |
-//|  clusters nearby pivots into "rejection areas", then watches for |
-//|  the classic break-and-retest pattern:                           |
+//|  Philosophy of v2:                                               |
+//|  - Pivots are detected on a HIGHER timeframe (H1 by default)     |
+//|    so what shows up are MAJOR swing highs and lows, not M15      |
+//|    noise.                                                        |
+//|  - A zone needs at least 3 separate touches to qualify - this    |
+//|    is what makes it a real "rejection area".                     |
+//|  - Only the closest 2 zones above and 2 zones below current      |
+//|    price are drawn. Total of 4 lines on the chart.               |
+//|  - Broken zones are hidden by default once their retest window   |
+//|    expires - the chart stays clean.                              |
+//|  - Signals require: decisive break + return to zone + STRONG     |
+//|    rejection candle. Realistically that prints ~2x per day on    |
+//|    GBPJPY M15.                                                   |
 //|                                                                  |
-//|     1. Price closes decisively beyond a zone (BREAK).            |
-//|     2. Price returns to the broken zone within N bars (RETEST).  |
-//|     3. Retest candle prints a rejection (pin / engulf) and       |
-//|        closes back in the breakout direction (CONFIRMATION).     |
-//|                                                                  |
-//|  On confirmation: arrow + alert + suggested SL/TP based on ATR.  |
-//|                                                                  |
-//|  Designed to stack on top of GBPJPY_PerfectEntry as a            |
-//|  structure / context layer. Use 1% fixed risk per trade.         |
+//|  Use 1% fixed risk per trade. No martingale.                     |
 //+------------------------------------------------------------------+
-#property copyright "GBPJPY S/R Break & Retest v1.0"
-#property version   "1.00"
+#property copyright "GBPJPY S/R Break & Retest v2.0"
+#property version   "2.00"
 #property indicator_chart_window
 #property indicator_buffers 2
 #property indicator_plots   2
@@ -25,87 +27,87 @@
 #property indicator_label1  "LongRetest"
 #property indicator_type1   DRAW_ARROW
 #property indicator_color1  clrLime
-#property indicator_width1  3
+#property indicator_width1  4
 
 #property indicator_label2  "ShortRetest"
 #property indicator_type2   DRAW_ARROW
 #property indicator_color2  clrRed
-#property indicator_width2  3
+#property indicator_width2  4
 
 //+------------------------------------------------------------------+
 //| Inputs                                                           |
 //+------------------------------------------------------------------+
-input group "=== Pivot detection ==="
-input int    InpLookbackBars     = 600;   // bars of history to scan
-input int    InpPivotLeft        = 4;     // bars to the left of a swing
-input int    InpPivotRight       = 4;     // bars to the right of a swing
-input int    InpMaxZones         = 12;    // keep top-N strongest zones (by touches)
+input group "=== Major-zone source (HTF) ==="
+input ENUM_TIMEFRAMES InpZoneTF      = PERIOD_H1; // pivots come from this TF
+input int    InpHTFBars              = 400;       // HTF bars to scan
+input int    InpPivotStrength        = 5;         // bars left+right (HIGHER = more major)
+input int    InpMinTouches           = 3;         // min pivots to qualify a zone
+input double InpClusterATRMult       = 0.30;      // tighter = sharper zones
+input int    InpATRPeriod            = 14;
 
-input group "=== Zone clustering ==="
-input int    InpATRPeriod        = 14;
-input double InpClusterATRMult   = 0.45;  // pivots within this many ATR merge into one zone
-input int    InpMinTouches       = 2;     // min touches for a zone to qualify
+input group "=== Selection (kept only) ==="
+input int    InpZonesAbovePrice      = 2;         // how many resistance levels to keep
+input int    InpZonesBelowPrice      = 2;         // how many support levels to keep
+input double InpMaxDistanceATR       = 4.0;       // ignore zones farther than this many ATR
+input int    InpRecencyHTFBars       = 250;       // ignore zones not touched in N HTF bars
 
-input group "=== Break & retest ==="
-input double InpBreakATRMult     = 0.40;  // close beyond zone by >= this many ATR confirms break
-input int    InpMaxRetestBars    = 60;    // zone is "live for retest" for this many bars after break
-input double InpRetestATRMult    = 0.35;  // wick within this many ATR of zone counts as retest touch
-input bool   InpRequireRejection = true;  // require pin bar / engulfing on the retest bar
-
-input group "=== Risk / Targets ==="
-input double InpSL_ATR_Mult      = 1.5;
-input double InpTP_RR            = 1.5;
+input group "=== Break & retest (chart TF) ==="
+input double InpBreakATRMult         = 0.60;      // close beyond by >= this many ATR = break
+input int    InpRetestMaxBars        = 30;        // chart-TF bars allowed for retest
+input double InpRetestTouchATRMult   = 0.25;      // wick within this much of zone = touch
+input bool   InpRequireStrongReject  = true;      // require pin/engulf with body<35% range
+input bool   InpHideExpiredBroken    = true;      // hide broken zones whose window expired
 
 input group "=== Visuals ==="
-input color  InpResColor         = clrFireBrick;     // active resistance
-input color  InpSupColor         = clrForestGreen;   // active support
-input color  InpBrokenUpColor    = clrDodgerBlue;    // resistance broken up -> new support
-input color  InpBrokenDnColor    = clrDarkOrange;    // support broken down -> new resistance
-input bool   InpFillZones        = true;
-input bool   InpExtendZones      = true;
-input bool   InpShowLabels       = true;
-input bool   InpShowDashboard    = true;
-input int    InpArrowOffsetPts   = 80;     // points offset for retest arrows
+input color  InpResColor             = C'200,40,40';   // resistance
+input color  InpSupColor             = C'40,160,40';   // support
+input color  InpFlipColor            = C'255,140,0';   // broken, pending retest
+input bool   InpFillZones            = true;
+input bool   InpExtendRight          = true;
+input bool   InpShowLabels           = true;
+input bool   InpShowStatus           = true;           // single-line status
+input int    InpArrowOffsetPts       = 80;
 
 input group "=== Alerts ==="
-input bool   InpPopupAlert       = true;
-input bool   InpPushAlert        = false;
-input bool   InpEmailAlert       = false;
+input bool   InpPopupAlert           = true;
+input bool   InpPushAlert            = false;
+input bool   InpEmailAlert           = false;
 
 input group "=== Debug ==="
-input bool   InpPrintDiag        = true;
+input bool   InpPrintDiag            = true;
 
 //+------------------------------------------------------------------+
-//| Constants & buffers                                              |
+//| Constants                                                        |
 //+------------------------------------------------------------------+
-#define OBJ_PREFIX     "SRBR_"
-#define DASH_PREFIX    "SRBR_DASH_"
-#define MAX_ZONES_HARD 64
+#define OBJ_PREFIX     "SRBR2_"
+#define STATUS_OBJ     "SRBR2_STATUS"
+#define MAX_ZONES_HARD 32
 
 double BufLong[];
 double BufShort[];
 
-int    hATR = INVALID_HANDLE;
+int    hATR_chart = INVALID_HANDLE;
+int    hATR_htf   = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
 //| Zone struct                                                      |
 //+------------------------------------------------------------------+
 struct SZone
 {
-   double   top;            // upper bound of the zone (price)
-   double   bottom;         // lower bound of the zone
-   int      touches;        // number of pivots that contributed
-   bool     bornAsResistance; // true if first pivot was a swing high
+   double   top;
+   double   bottom;
+   int      touches;
+   bool     bornAsResistance;
    datetime firstTouchTime;
    datetime lastTouchTime;
-   // Break state
-   int      brokenDir;      // 0 = intact, +1 = broken UP, -1 = broken DOWN
+   double   score;            // touches weighted by recency
+   // break / retest state on chart TF
+   int      brokenDir;        // 0 = intact, +1 up, -1 down
    datetime brokenTime;
-   int      brokenBar;      // series index at break (0 = current)
-   // Retest state
+   int      brokenChartBar;
    bool     retestFired;
    datetime retestTime;
-   double   retestPrice;
+   bool     visible;          // whether to draw it
 };
 
 SZone gZones[];
@@ -114,15 +116,8 @@ int   gZoneCount = 0;
 datetime gLastBarSeen = 0;
 
 //+------------------------------------------------------------------+
-//| Helpers                                                          |
+//| Candle helpers                                                   |
 //+------------------------------------------------------------------+
-double PipSize()
-{
-   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   if(digits == 3 || digits == 5) return _Point * 10.0;
-   return _Point;
-}
-
 bool IsBullEng(const double &o[], const double &c[], int i, int total)
 {
    if(i + 1 >= total) return false;
@@ -144,7 +139,7 @@ bool IsHammer(const double &o[], const double &h[], const double &l[], const dou
    if(rng <= 0) return false;
    double lw = MathMin(o[i], c[i]) - l[i];
    double uw = h[i] - MathMax(o[i], c[i]);
-   return (lw >= 1.8 * body) && (uw <= body) && (body / rng <= 0.45);
+   return (lw >= 2.0 * body) && (uw <= 0.7 * body) && (body / rng <= 0.35);
 }
 
 bool IsShootingStar(const double &o[], const double &h[], const double &l[], const double &c[], int i)
@@ -154,14 +149,13 @@ bool IsShootingStar(const double &o[], const double &h[], const double &l[], con
    if(rng <= 0) return false;
    double lw = MathMin(o[i], c[i]) - l[i];
    double uw = h[i] - MathMax(o[i], c[i]);
-   return (uw >= 1.8 * body) && (lw <= body) && (body / rng <= 0.45);
+   return (uw >= 2.0 * body) && (lw <= 0.7 * body) && (body / rng <= 0.35);
 }
 
 bool BullishRejection(const double &o[], const double &h[], const double &l[], const double &c[], int i, int total)
 {
    return IsHammer(o,h,l,c,i) || IsBullEng(o,c,i,total);
 }
-
 bool BearishRejection(const double &o[], const double &h[], const double &l[], const double &c[], int i, int total)
 {
    return IsShootingStar(o,h,l,c,i) || IsBearEng(o,c,i,total);
@@ -175,20 +169,21 @@ int OnInit()
    SetIndexBuffer(0, BufLong,  INDICATOR_DATA);
    SetIndexBuffer(1, BufShort, INDICATOR_DATA);
 
-   PlotIndexSetInteger(0, PLOT_ARROW, 233); // up
-   PlotIndexSetInteger(1, PLOT_ARROW, 234); // down
+   PlotIndexSetInteger(0, PLOT_ARROW, 233);
+   PlotIndexSetInteger(1, PLOT_ARROW, 234);
    PlotIndexSetDouble (0, PLOT_EMPTY_VALUE, 0.0);
    PlotIndexSetDouble (1, PLOT_EMPTY_VALUE, 0.0);
-   PlotIndexSetInteger(0, PLOT_ARROW_SHIFT, 12);
+   PlotIndexSetInteger(0, PLOT_ARROW_SHIFT,  12);
    PlotIndexSetInteger(1, PLOT_ARROW_SHIFT, -12);
 
    ArraySetAsSeries(BufLong,  true);
    ArraySetAsSeries(BufShort, true);
 
-   hATR = iATR(_Symbol, _Period, InpATRPeriod);
-   if(hATR == INVALID_HANDLE)
+   hATR_chart = iATR(_Symbol, _Period,     InpATRPeriod);
+   hATR_htf   = iATR(_Symbol, InpZoneTF,   InpATRPeriod);
+   if(hATR_chart == INVALID_HANDLE || hATR_htf == INVALID_HANDLE)
    {
-      Print("SRBR: failed to create ATR handle");
+      Print("SRBR2: failed to create ATR handles");
       return INIT_FAILED;
    }
 
@@ -196,8 +191,8 @@ int OnInit()
    gZoneCount = 0;
 
    IndicatorSetString(INDICATOR_SHORTNAME,
-      StringFormat("S/R Break&Retest [LB=%d, pivot=%d/%d]",
-                   InpLookbackBars, InpPivotLeft, InpPivotRight));
+      StringFormat("S/R v2 [%s pivots, %dx, ≥%d touches]",
+                   EnumToString(InpZoneTF), InpPivotStrength, InpMinTouches));
    return INIT_SUCCEEDED;
 }
 
@@ -206,8 +201,10 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   if(hATR != INVALID_HANDLE) IndicatorRelease(hATR);
+   if(hATR_chart != INVALID_HANDLE) IndicatorRelease(hATR_chart);
+   if(hATR_htf   != INVALID_HANDLE) IndicatorRelease(hATR_htf);
    ObjectsDeleteAll(0, OBJ_PREFIX);
+   ObjectDelete(0, STATUS_OBJ);
 }
 
 //+------------------------------------------------------------------+
@@ -218,25 +215,22 @@ void ResetZones()
    gZoneCount = 0;
    for(int i = 0; i < MAX_ZONES_HARD; i++)
    {
-      gZones[i].top = 0; gZones[i].bottom = 0;
-      gZones[i].touches = 0;
+      gZones[i].top = 0; gZones[i].bottom = 0; gZones[i].touches = 0;
       gZones[i].bornAsResistance = false;
-      gZones[i].firstTouchTime = 0; gZones[i].lastTouchTime = 0;
-      gZones[i].brokenDir = 0; gZones[i].brokenTime = 0; gZones[i].brokenBar = -1;
-      gZones[i].retestFired = false; gZones[i].retestTime = 0; gZones[i].retestPrice = 0;
+      gZones[i].firstTouchTime = 0; gZones[i].lastTouchTime = 0; gZones[i].score = 0;
+      gZones[i].brokenDir = 0; gZones[i].brokenTime = 0; gZones[i].brokenChartBar = -1;
+      gZones[i].retestFired = false; gZones[i].retestTime = 0;
+      gZones[i].visible = false;
    }
 }
 
-// Add a pivot (price + time + isHigh) to the zone list, clustering as needed.
 void AddPivot(double price, datetime t, bool isHigh, double tol)
 {
-   // Try to merge with an existing zone
    for(int z = 0; z < gZoneCount; z++)
    {
       double mid = 0.5 * (gZones[z].top + gZones[z].bottom);
       if(MathAbs(price - mid) <= tol)
       {
-         // Extend bounds
          if(price > gZones[z].top)    gZones[z].top    = price;
          if(price < gZones[z].bottom) gZones[z].bottom = price;
          gZones[z].touches++;
@@ -246,7 +240,6 @@ void AddPivot(double price, datetime t, bool isHigh, double tol)
          return;
       }
    }
-   // Create new zone
    if(gZoneCount >= MAX_ZONES_HARD) return;
    int idx = gZoneCount++;
    double half = tol * 0.5;
@@ -256,173 +249,198 @@ void AddPivot(double price, datetime t, bool isHigh, double tol)
    gZones[idx].bornAsResistance = isHigh;
    gZones[idx].firstTouchTime   = t;
    gZones[idx].lastTouchTime    = t;
-   gZones[idx].brokenDir        = 0;
-   gZones[idx].brokenTime       = 0;
-   gZones[idx].brokenBar        = -1;
-   gZones[idx].retestFired      = false;
 }
 
-// Sort zones by touches desc, then keep top-N
-void TrimToStrongest()
+//+------------------------------------------------------------------+
+//| Build zones from HTF pivots                                      |
+//+------------------------------------------------------------------+
+bool BuildZonesFromHTF(double currentPrice)
 {
-   // simple selection-style sort, n is tiny
-   for(int i = 0; i < gZoneCount - 1; i++)
+   ResetZones();
+
+   int htfBars = MathMin(InpHTFBars, Bars(_Symbol, InpZoneTF));
+   if(htfBars < InpPivotStrength * 4) return false;
+
+   datetime htfTime[];
+   double   htfHigh[], htfLow[];
+   ArraySetAsSeries(htfTime, true);
+   ArraySetAsSeries(htfHigh, true);
+   ArraySetAsSeries(htfLow,  true);
+   if(CopyTime(_Symbol, InpZoneTF, 0, htfBars, htfTime) <= 0) return false;
+   if(CopyHigh(_Symbol, InpZoneTF, 0, htfBars, htfHigh) <= 0) return false;
+   if(CopyLow (_Symbol, InpZoneTF, 0, htfBars, htfLow ) <= 0) return false;
+
+   double htfATR[];
+   ArraySetAsSeries(htfATR, true);
+   if(CopyBuffer(hATR_htf, 0, 0, htfBars, htfATR) <= 0) return false;
+
+   double atrSum = 0; int atrN = 0;
+   for(int k = 0; k < MathMin(50, htfBars); k++)
+      if(htfATR[k] > 0) { atrSum += htfATR[k]; atrN++; }
+   double atrAvg = (atrN > 0) ? atrSum / atrN : htfATR[0];
+   double cluster = atrAvg * InpClusterATRMult;
+   if(cluster <= 0) cluster = 100 * _Point;
+
+   // detect HTF swing pivots, oldest -> newest
+   int strength = InpPivotStrength;
+   int scanFrom = htfBars - strength - 1;
+   for(int i = scanFrom; i >= strength; i--)
    {
-      int best = i;
-      for(int j = i+1; j < gZoneCount; j++)
-         if(gZones[j].touches > gZones[best].touches) best = j;
-      if(best != i)
-      {
-         SZone tmp = gZones[i]; gZones[i] = gZones[best]; gZones[best] = tmp;
-      }
-   }
-   if(gZoneCount > InpMaxZones) gZoneCount = InpMaxZones;
-}
+      bool isHigh = true;
+      for(int k = 1; k <= strength && isHigh; k++)
+         if(htfHigh[i] <= htfHigh[i+k] || htfHigh[i] <= htfHigh[i-k]) isHigh = false;
+      if(isHigh) AddPivot(htfHigh[i], htfTime[i], true, cluster);
 
-// Drop zones below min-touch threshold (run AFTER all pivots added)
-void DropWeakZones()
-{
+      bool isLow = true;
+      for(int k = 1; k <= strength && isLow; k++)
+         if(htfLow[i]  >= htfLow[i+k]  || htfLow[i]  >= htfLow[i-k])  isLow = false;
+      if(isLow)  AddPivot(htfLow[i],  htfTime[i], false, cluster);
+   }
+
+   // ----- score & filter -----
+   datetime tNewest = htfTime[0];
+   int htfPeriodSec = PeriodSeconds(InpZoneTF);
+   double maxDist = atrAvg * InpMaxDistanceATR;
+
+   for(int z = 0; z < gZoneCount; z++)
+   {
+      // touches threshold
+      if(gZones[z].touches < InpMinTouches) { gZones[z].score = -1; continue; }
+
+      // recency: how many HTF bars since last touch?
+      int barsAgo = (int)((tNewest - gZones[z].lastTouchTime) / htfPeriodSec);
+      if(barsAgo > InpRecencyHTFBars) { gZones[z].score = -1; continue; }
+
+      // distance from current price (use closest edge)
+      double mid = 0.5 * (gZones[z].top + gZones[z].bottom);
+      double distEdge = (currentPrice >= gZones[z].top)    ? currentPrice - gZones[z].top
+                     : (currentPrice <= gZones[z].bottom)  ? gZones[z].bottom - currentPrice
+                                                           : 0;
+      if(distEdge > maxDist) { gZones[z].score = -1; continue; }
+
+      double recencyFactor = 1.0 - (double)barsAgo / (double)InpRecencyHTFBars;
+      gZones[z].score = gZones[z].touches * (1.0 + recencyFactor);
+      // clarify side from current price (rebuild bornAsResistance for this snapshot)
+      gZones[z].bornAsResistance = (mid >= currentPrice);
+   }
+
+   // drop disqualified zones (score < 0)
    int w = 0;
    for(int r = 0; r < gZoneCount; r++)
    {
-      if(gZones[r].touches >= InpMinTouches)
+      if(gZones[r].score >= 0)
       {
          if(w != r) gZones[w] = gZones[r];
          w++;
       }
    }
    gZoneCount = w;
+
+   // ----- pick top-N above and top-N below price -----
+   // separate, sort by score desc, then keep
+   SZone above[]; ArrayResize(above, gZoneCount);
+   SZone below[]; ArrayResize(below, gZoneCount);
+   int aN = 0, bN = 0;
+   for(int z = 0; z < gZoneCount; z++)
+   {
+      double mid = 0.5 * (gZones[z].top + gZones[z].bottom);
+      if(mid >= currentPrice) above[aN++] = gZones[z];
+      else                    below[bN++] = gZones[z];
+   }
+   SortByScoreDesc(above, aN);
+   SortByScoreDesc(below, bN);
+   if(aN > InpZonesAbovePrice) aN = InpZonesAbovePrice;
+   if(bN > InpZonesBelowPrice) bN = InpZonesBelowPrice;
+
+   gZoneCount = 0;
+   for(int i = 0; i < aN; i++) gZones[gZoneCount++] = above[i];
+   for(int i = 0; i < bN; i++) gZones[gZoneCount++] = below[i];
+   for(int z = 0; z < gZoneCount; z++) gZones[z].visible = true;
+
+   return true;
 }
 
-//+------------------------------------------------------------------+
-//| Build zones from pivots                                          |
-//+------------------------------------------------------------------+
-void BuildZones(const datetime &time[],
-                const double   &high[],
-                const double   &low[],
-                const double   &atrBuf[],
-                int rates_total)
+void SortByScoreDesc(SZone &arr[], int n)
 {
-   ResetZones();
-
-   int scanFrom = MathMin(InpLookbackBars, rates_total - InpPivotLeft - InpPivotRight - 2);
-   if(scanFrom < InpPivotRight + InpPivotLeft + 2) return;
-
-   double atrAvg = 0; int atrN = 0;
-   for(int k = 0; k < MathMin(50, ArraySize(atrBuf)); k++)
+   for(int i = 0; i < n - 1; i++)
    {
-      if(atrBuf[k] > 0) { atrAvg += atrBuf[k]; atrN++; }
+      int best = i;
+      for(int j = i + 1; j < n; j++)
+         if(arr[j].score > arr[best].score) best = j;
+      if(best != i) { SZone tmp = arr[i]; arr[i] = arr[best]; arr[best] = tmp; }
    }
-   if(atrN > 0) atrAvg /= atrN; else atrAvg = atrBuf[0];
-
-   double cluster = atrAvg * InpClusterATRMult;
-   if(cluster <= 0) cluster = 10 * _Point;
-
-   // Walk from oldest to newest so first-touch times are correct
-   for(int i = scanFrom; i >= InpPivotRight; i--)
-   {
-      // Swing high?
-      bool isHigh = true;
-      for(int k = 1; k <= InpPivotLeft && isHigh;  k++) if(high[i] <= high[i+k]) isHigh = false;
-      for(int k = 1; k <= InpPivotRight && isHigh; k++) if(high[i] <= high[i-k]) isHigh = false;
-      if(isHigh) AddPivot(high[i], time[i], true, cluster);
-
-      // Swing low?
-      bool isLow = true;
-      for(int k = 1; k <= InpPivotLeft && isLow;  k++) if(low[i] >= low[i+k]) isLow = false;
-      for(int k = 1; k <= InpPivotRight && isLow; k++) if(low[i] >= low[i-k]) isLow = false;
-      if(isLow) AddPivot(low[i], time[i], false, cluster);
-   }
-
-   DropWeakZones();
-   TrimToStrongest();
 }
 
 //+------------------------------------------------------------------+
-//| Detect break + retest for each zone                              |
+//| Detect break + retest on CHART timeframe                         |
 //+------------------------------------------------------------------+
 void DetectBreaksAndRetests(const datetime &time[],
                             const double   &open[],
                             const double   &high[],
                             const double   &low[],
                             const double   &close[],
-                            const double   &atrBuf[],
+                            const double   &chartATR[],
                             int rates_total)
 {
-   int scanFrom = MathMin(InpLookbackBars, rates_total - 2);
-   if(scanFrom < 2) return;
+   // Limit chart scan window for performance.
+   int chartScan = MathMin(800, rates_total - 2);
+   if(chartScan < 5) return;
 
    for(int z = 0; z < gZoneCount; z++)
    {
-      // ----- Step 1: find the FIRST decisive break -----
+      // ---- Find the first break (oldest -> newest) ----
       int brokenAt = -1;
       int brokenDir = 0;
-      // walk oldest -> newest; at each bar, if no break yet, test for one
-      for(int i = scanFrom; i >= 1; i--)
+      for(int i = chartScan; i >= 1; i--)
       {
-         if(i >= ArraySize(atrBuf)) continue;
-         double atr = atrBuf[i];
+         double atr = chartATR[i];
+         if(atr <= 0) continue;
          double buf = atr * InpBreakATRMult;
-         if(brokenDir == 0)
-         {
-            if(close[i] > gZones[z].top + buf)    { brokenDir = +1; brokenAt = i; break; }
-            if(close[i] < gZones[z].bottom - buf) { brokenDir = -1; brokenAt = i; break; }
-         }
+         if(close[i] > gZones[z].top    + buf) { brokenDir = +1; brokenAt = i; break; }
+         if(close[i] < gZones[z].bottom - buf) { brokenDir = -1; brokenAt = i; break; }
       }
 
-      if(brokenDir == 0) continue; // zone is still intact
-      gZones[z].brokenDir  = brokenDir;
-      gZones[z].brokenBar  = brokenAt;
-      gZones[z].brokenTime = time[brokenAt];
+      if(brokenDir == 0) continue;
+      gZones[z].brokenDir       = brokenDir;
+      gZones[z].brokenChartBar  = brokenAt;
+      gZones[z].brokenTime      = time[brokenAt];
 
-      // ----- Step 2: walk forward from break, look for retest within window -----
-      int windowEnd = MathMax(1, brokenAt - InpMaxRetestBars);
+      // ---- Walk forward for the retest window ----
+      int windowEnd = MathMax(1, brokenAt - InpRetestMaxBars);
       bool touched = false;
       for(int i = brokenAt - 1; i >= windowEnd; i--)
       {
-         if(i >= ArraySize(atrBuf)) continue;
-         double atr = atrBuf[i];
-         double tol = atr * InpRetestATRMult;
+         double atr = chartATR[i];
+         if(atr <= 0) continue;
+         double tol = atr * InpRetestTouchATRMult;
 
-         // Has price re-entered the zone?
          if(brokenDir == +1)
          {
-            // up-broken: zone now acts as support; need LOW to dip into zone
             if(low[i] <= gZones[z].top + tol && low[i] >= gZones[z].bottom - tol * 2)
                touched = true;
          }
          else
          {
-            // down-broken: zone now acts as resistance; need HIGH to push into zone
             if(high[i] >= gZones[z].bottom - tol && high[i] <= gZones[z].top + tol * 2)
                touched = true;
          }
-
          if(!touched) continue;
 
-         // Once we've touched, this same bar (or any subsequent bar within window)
-         // can be the confirmation bar.
          bool confirm = false;
          if(brokenDir == +1)
          {
-            // need close back ABOVE the zone with bullish character
             if(close[i] > gZones[z].top + 0.10 * atr && close[i] > open[i])
-            {
-               if(!InpRequireRejection || BullishRejection(open, high, low, close, i, rates_total))
-                  confirm = true;
-            }
+               confirm = (!InpRequireStrongReject) ||
+                         BullishRejection(open, high, low, close, i, rates_total);
          }
          else
          {
-            // need close back BELOW the zone with bearish character
             if(close[i] < gZones[z].bottom - 0.10 * atr && close[i] < open[i])
-            {
-               if(!InpRequireRejection || BearishRejection(open, high, low, close, i, rates_total))
-                  confirm = true;
-            }
+               confirm = (!InpRequireStrongReject) ||
+                         BearishRejection(open, high, low, close, i, rates_total);
          }
 
-         // Decisive failure? close on the wrong side of the zone -> invalidate
+         // hard invalidation
          if(brokenDir == +1 && close[i] < gZones[z].bottom - 0.5 * atr) break;
          if(brokenDir == -1 && close[i] > gZones[z].top    + 0.5 * atr) break;
 
@@ -430,23 +448,22 @@ void DetectBreaksAndRetests(const datetime &time[],
          {
             gZones[z].retestFired = true;
             gZones[z].retestTime  = time[i];
-            gZones[z].retestPrice = close[i];
 
             double offset = InpArrowOffsetPts * _Point;
-            if(brokenDir == +1)
-               BufLong[i]  = low[i]  - offset;
-            else
-               BufShort[i] = high[i] + offset;
+            if(brokenDir == +1) BufLong[i]  = low[i]  - offset;
+            else                BufShort[i] = high[i] + offset;
 
-            // SL/TP suggestion (drawn dotted)
-            DrawTradeLevels(z, i, time[i], high, low, close, atrBuf, brokenDir);
-
-            // Alert only for the most recent retest (bar 1 = just-closed)
             if(i == 1)
                RaiseAlert(brokenDir, time[i], close[i], gZones[z]);
-
             break;
          }
+      }
+
+      // hide expired-broken zones if user wants
+      if(InpHideExpiredBroken && gZones[z].brokenDir != 0 && !gZones[z].retestFired)
+      {
+         int barsSinceBreak = brokenAt; // brokenAt is series index from now
+         if(barsSinceBreak > InpRetestMaxBars) gZones[z].visible = false;
       }
    }
 }
@@ -463,16 +480,17 @@ void DrawZones(const datetime &time[], int rates_total)
 
    for(int z = 0; z < gZoneCount; z++)
    {
+      if(!gZones[z].visible) continue;
+
       string name = StringFormat("%sZ%d", OBJ_PREFIX, z);
       datetime t1 = gZones[z].firstTouchTime;
-      datetime t2 = InpExtendZones ? tFuture : gZones[z].lastTouchTime;
-      if(t1 == 0) t1 = tNow - PeriodSeconds(_Period) * 50;
+      datetime t2 = InpExtendRight ? tFuture : tNow;
+      if(t1 == 0 || t1 > t2) t1 = tNow - PeriodSeconds(_Period) * 50;
 
       color c;
-      if(gZones[z].brokenDir == +1)      c = InpBrokenUpColor;
-      else if(gZones[z].brokenDir == -1) c = InpBrokenDnColor;
-      else if(gZones[z].bornAsResistance) c = InpResColor;
-      else                                c = InpSupColor;
+      if(gZones[z].brokenDir != 0)         c = InpFlipColor;
+      else if(gZones[z].bornAsResistance)  c = InpResColor;
+      else                                 c = InpSupColor;
 
       if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, gZones[z].top, t2, gZones[z].bottom))
       {
@@ -480,6 +498,7 @@ void DrawZones(const datetime &time[], int rates_total)
          ObjectSetInteger(0, name, OBJPROP_BACK,  InpFillZones);
          ObjectSetInteger(0, name, OBJPROP_FILL,  InpFillZones);
          ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, name, OBJPROP_STYLE, gZones[z].brokenDir != 0 ? STYLE_DASH : STYLE_SOLID);
          ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
          ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
       }
@@ -488,116 +507,59 @@ void DrawZones(const datetime &time[], int rates_total)
       {
          string lblName = StringFormat("%sL%d", OBJ_PREFIX, z);
          double mid = 0.5 * (gZones[z].top + gZones[z].bottom);
-         string txt;
-         if(gZones[z].brokenDir == +1)      txt = StringFormat("BROKEN UP x%d", gZones[z].touches);
-         else if(gZones[z].brokenDir == -1) txt = StringFormat("BROKEN DN x%d", gZones[z].touches);
-         else                               txt = StringFormat("%s x%d", gZones[z].bornAsResistance ? "RES" : "SUP", gZones[z].touches);
-         if(gZones[z].retestFired) txt += " [RETESTED]";
+         string tag;
+         if(gZones[z].brokenDir != 0 && !gZones[z].retestFired) tag = "RETEST?";
+         else if(gZones[z].retestFired)                          tag = "RETESTED";
+         else                                                    tag = gZones[z].bornAsResistance ? "RES" : "SUP";
+         string txt = StringFormat("%s  %.3f  x%d", tag, mid, gZones[z].touches);
 
          if(ObjectCreate(0, lblName, OBJ_TEXT, 0, t2, mid))
          {
-            ObjectSetString (0, lblName, OBJPROP_TEXT,  txt);
-            ObjectSetInteger(0, lblName, OBJPROP_COLOR, c);
-            ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 8);
-            ObjectSetInteger(0, lblName, OBJPROP_ANCHOR, ANCHOR_RIGHT);
+            ObjectSetString (0, lblName, OBJPROP_TEXT,     txt);
+            ObjectSetInteger(0, lblName, OBJPROP_COLOR,    c);
+            ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 9);
+            ObjectSetInteger(0, lblName, OBJPROP_ANCHOR,   ANCHOR_RIGHT);
             ObjectSetInteger(0, lblName, OBJPROP_SELECTABLE, false);
-            ObjectSetInteger(0, lblName, OBJPROP_HIDDEN, true);
+            ObjectSetInteger(0, lblName, OBJPROP_HIDDEN,   true);
          }
       }
    }
 }
 
-void DrawTradeLevels(int z, int i, datetime t,
-                     const double &high[],
-                     const double &low[],   const double &close[],
-                     const double &atrBuf[], int dir)
-{
-   if(i >= ArraySize(atrBuf)) return;
-   double atr   = atrBuf[i];
-   double entry = close[i];
-   double sl, tp;
-   if(dir == +1)
-   {
-      sl = low[i]  - 0.2 * atr;
-      double risk = entry - sl;
-      if(risk <= 0) risk = atr * InpSL_ATR_Mult;
-      tp = entry + risk * InpTP_RR;
-   }
-   else
-   {
-      sl = high[i] + 0.2 * atr;
-      double risk = sl - entry;
-      if(risk <= 0) risk = atr * InpSL_ATR_Mult;
-      tp = entry - risk * InpTP_RR;
-   }
-
-   string base = StringFormat("%sT_%d_%s", OBJ_PREFIX, z, TimeToString(t, TIME_DATE|TIME_MINUTES));
-   datetime t2 = t + PeriodSeconds(_Period) * 25;
-
-   string nE = base + "_E", nS = base + "_SL", nT = base + "_TP";
-
-   if(ObjectCreate(0, nE, OBJ_TREND, 0, t, entry, t2, entry))
-   {
-      ObjectSetInteger(0, nE, OBJPROP_COLOR, dir == +1 ? clrLime : clrRed);
-      ObjectSetInteger(0, nE, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, nE, OBJPROP_RAY_RIGHT, false);
-      ObjectSetInteger(0, nE, OBJPROP_BACK, false);
-      ObjectSetInteger(0, nE, OBJPROP_HIDDEN, true);
-   }
-   if(ObjectCreate(0, nS, OBJ_TREND, 0, t, sl, t2, sl))
-   {
-      ObjectSetInteger(0, nS, OBJPROP_COLOR, clrTomato);
-      ObjectSetInteger(0, nS, OBJPROP_STYLE, STYLE_DOT);
-      ObjectSetInteger(0, nS, OBJPROP_RAY_RIGHT, false);
-      ObjectSetInteger(0, nS, OBJPROP_HIDDEN, true);
-   }
-   if(ObjectCreate(0, nT, OBJ_TREND, 0, t, tp, t2, tp))
-   {
-      ObjectSetInteger(0, nT, OBJPROP_COLOR, clrAqua);
-      ObjectSetInteger(0, nT, OBJPROP_STYLE, STYLE_DOT);
-      ObjectSetInteger(0, nT, OBJPROP_RAY_RIGHT, false);
-      ObjectSetInteger(0, nT, OBJPROP_HIDDEN, true);
-   }
-}
-
 //+------------------------------------------------------------------+
-//| Dashboard                                                        |
+//| One-line status                                                  |
 //+------------------------------------------------------------------+
-void UpdateDashboard()
+void UpdateStatus(double currentPrice)
 {
-   int active = 0, broken = 0, retested = 0;
+   if(!InpShowStatus) { ObjectDelete(0, STATUS_OBJ); return; }
+
+   int up = 0, dn = 0, pending = 0, retd = 0;
    for(int z = 0; z < gZoneCount; z++)
    {
-      if(gZones[z].brokenDir == 0) active++;
-      else                         broken++;
-      if(gZones[z].retestFired)    retested++;
+      if(!gZones[z].visible) continue;
+      double mid = 0.5 * (gZones[z].top + gZones[z].bottom);
+      if(mid >= currentPrice) up++; else dn++;
+      if(gZones[z].brokenDir != 0 && !gZones[z].retestFired) pending++;
+      if(gZones[z].retestFired) retd++;
    }
 
-   string lines[5];
-   lines[0] = StringFormat("S/R Break & Retest  [%s %s]",
-                           _Symbol, EnumToString((ENUM_TIMEFRAMES)_Period));
-   lines[1] = StringFormat("Zones tracked: %d  (top %d kept)", gZoneCount, InpMaxZones);
-   lines[2] = StringFormat("Intact: %d   Broken: %d   Retested: %d", active, broken, retested);
-   lines[3] = StringFormat("Pivot %d/%d  Cluster %.2fxATR  Break %.2fxATR",
-                           InpPivotLeft, InpPivotRight, InpClusterATRMult, InpBreakATRMult);
-   lines[4] = "Wait for arrow before entering. Risk 1% fixed.";
+   string txt = StringFormat(
+      "GBPJPY S/R v2  |  %d zones (%d above %d below)  |  pending retest: %d  |  fired today: %d  |  %s pivots ≥%d touches",
+      up + dn, up, dn, pending, retd,
+      EnumToString(InpZoneTF), InpMinTouches);
 
-   for(int k = 0; k < 5; k++)
+   if(ObjectFind(0, STATUS_OBJ) < 0)
    {
-      string nm = StringFormat("%sLINE%d", DASH_PREFIX, k);
-      if(ObjectFind(0, nm) < 0)
-      {
-         ObjectCreate(0, nm, OBJ_LABEL, 0, 0, 0);
-         ObjectSetInteger(0, nm, OBJPROP_CORNER,    CORNER_LEFT_UPPER);
-         ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, 12);
-         ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, 18 + k * 16);
-         ObjectSetInteger(0, nm, OBJPROP_FONTSIZE,  9);
-         ObjectSetInteger(0, nm, OBJPROP_SELECTABLE,false);
-         ObjectSetInteger(0, nm, OBJPROP_HIDDEN,    true);
-      }
-      ObjectSetString (0, nm, OBJPROP_TEXT,  lines[k]);
-      ObjectSetInteger(0, nm, OBJPROP_COLOR, k == 0 ? clrGold : clrSilver);
+      ObjectCreate(0, STATUS_OBJ, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, STATUS_OBJ, OBJPROP_CORNER,    CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, STATUS_OBJ, OBJPROP_XDISTANCE, 12);
+      ObjectSetInteger(0, STATUS_OBJ, OBJPROP_YDISTANCE, 18);
+      ObjectSetInteger(0, STATUS_OBJ, OBJPROP_FONTSIZE,  9);
+      ObjectSetInteger(0, STATUS_OBJ, OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0, STATUS_OBJ, OBJPROP_HIDDEN,    true);
    }
+   ObjectSetString (0, STATUS_OBJ, OBJPROP_TEXT,  txt);
+   ObjectSetInteger(0, STATUS_OBJ, OBJPROP_COLOR, clrGold);
 }
 
 //+------------------------------------------------------------------+
@@ -606,11 +568,13 @@ void UpdateDashboard()
 void RaiseAlert(int dir, datetime t, double price, const SZone &z)
 {
    string side = (dir == +1) ? "LONG retest" : "SHORT retest";
-   string msg  = StringFormat("%s %s @ %.3f  Zone[%.3f - %.3f] x%d touches",
-                              _Symbol, side, price, z.bottom, z.top, z.touches);
+   string msg  = StringFormat(
+      "%s %s @ %.3f  |  Zone %.3f-%.3f x%d touches  |  %s",
+      _Symbol, side, price, z.bottom, z.top, z.touches,
+      EnumToString(InpZoneTF));
    if(InpPopupAlert) Alert(msg);
    if(InpPushAlert)  SendNotification(msg);
-   if(InpEmailAlert) SendMail("GBPJPY S/R Break & Retest", msg);
+   if(InpEmailAlert) SendMail("GBPJPY S/R Break & Retest v2", msg);
 }
 
 //+------------------------------------------------------------------+
@@ -627,7 +591,7 @@ int OnCalculate(const int rates_total,
                 const long     &volume[],
                 const int      &spread[])
 {
-   if(rates_total < InpLookbackBars + 10) return 0;
+   if(rates_total < 100) return 0;
 
    ArraySetAsSeries(time,  true);
    ArraySetAsSeries(open,  true);
@@ -635,38 +599,42 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(low,   true);
    ArraySetAsSeries(close, true);
 
-   // Run on new-bar only (not every tick) for performance.
    bool firstRun = (prev_calculated == 0);
    bool newBar   = (time[0] != gLastBarSeen);
    if(!firstRun && !newBar) return rates_total;
    gLastBarSeen = time[0];
 
-   // Reset arrow buffers
    ArrayInitialize(BufLong,  0.0);
    ArrayInitialize(BufShort, 0.0);
 
-   // ATR buffer
-   double atrBuf[];
-   ArraySetAsSeries(atrBuf, true);
-   int copied = CopyBuffer(hATR, 0, 0, InpLookbackBars + 5, atrBuf);
-   if(copied < 50) return prev_calculated;
+   double chartATR[];
+   ArraySetAsSeries(chartATR, true);
+   int needed = MathMin(800, rates_total);
+   if(CopyBuffer(hATR_chart, 0, 0, needed + 5, chartATR) < 50) return prev_calculated;
 
-   BuildZones(time, high, low, atrBuf, rates_total);
-   DetectBreaksAndRetests(time, open, high, low, close, atrBuf, rates_total);
+   double currentPrice = close[0];
+   if(!BuildZonesFromHTF(currentPrice))
+   {
+      // not enough HTF data yet
+      ObjectsDeleteAll(0, OBJ_PREFIX);
+      UpdateStatus(currentPrice);
+      return rates_total;
+   }
+   DetectBreaksAndRetests(time, open, high, low, close, chartATR, rates_total);
    DrawZones(time, rates_total);
-   if(InpShowDashboard) UpdateDashboard();
+   UpdateStatus(currentPrice);
 
    if(InpPrintDiag && firstRun)
    {
-      int active = 0, broken = 0, retested = 0;
+      int up = 0, dn = 0;
       for(int z = 0; z < gZoneCount; z++)
       {
-         if(gZones[z].brokenDir == 0) active++; else broken++;
-         if(gZones[z].retestFired)    retested++;
+         if(!gZones[z].visible) continue;
+         double mid = 0.5 * (gZones[z].top + gZones[z].bottom);
+         if(mid >= currentPrice) up++; else dn++;
       }
-      PrintFormat("SRBR v1: zones=%d (intact=%d broken=%d retested=%d) on %s %s",
-                  gZoneCount, active, broken, retested,
-                  _Symbol, EnumToString((ENUM_TIMEFRAMES)_Period));
+      PrintFormat("SRBR v2: %d major zones (%d above, %d below) | %s pivots, str=%d, min=%d touches",
+                  up + dn, up, dn, EnumToString(InpZoneTF), InpPivotStrength, InpMinTouches);
    }
 
    ChartRedraw(0);
