@@ -47,8 +47,8 @@ enum ENUM_GJPE_MODE
 
 //--- Inputs ---------------------------------------------------------
 input group "=== Mode ==="
-input ENUM_GJPE_MODE  InpMode           = MODE_BALANCED;
-input int             InpMinScoreCustom = 6;   // Used only if InpMode=MODE_CUSTOM
+input ENUM_GJPE_MODE  InpMode           = MODE_SNIPER;   // Default: 1-2 trades/day, ~80%+ WR
+input int             InpMinScoreCustom = 10;  // Used only if InpMode=MODE_CUSTOM
 
 input group "=== Trend Filter (HTF) ==="
 input ENUM_TIMEFRAMES InpTrendTF        = PERIOD_H1;
@@ -90,7 +90,8 @@ input int             InpSessionStart   = 8;     // server hour
 input int             InpSessionEnd     = 21;
 
 input group "=== Anti-Overtrade ==="
-input int             InpMinBarsGap     = 8;     // bars between signals
+input int             InpMinBarsGap     = 32;    // M15: 32 bars = 8 hours = max ~2 signals/day
+input int             InpMaxSignalsPerDay = 2;   // hard cap per calendar day
 
 input group "=== Visuals ==="
 input bool            InpDrawSLTPLines  = true;  // dotted SL/TP next to arrow
@@ -125,6 +126,8 @@ int hMACD     = INVALID_HANDLE;
 //--- State
 datetime lastAlertBar = 0;
 int      lastSignalBar= -9999;
+datetime currentDay   = 0;
+int      signalsToday = 0;
 long     cntBars=0, cntBuy=0, cntSell=0;
 
 //+------------------------------------------------------------------+
@@ -280,6 +283,8 @@ int OnCalculate(const int rates_total,
       ArrayInitialize(BufSell, 0.0);
       cntBars=cntBuy=cntSell=0;
       lastSignalBar = -9999;
+      currentDay    = 0;
+      signalsToday  = 0;
       start = MathMin(rates_total - 5, 2000);
      }
    else
@@ -447,8 +452,18 @@ int OnCalculate(const int rates_total,
 
       if(!buyOK && !sellOK) continue;
 
-      // Anti-overtrade
+      // Anti-overtrade: bars gap
       if(lastSignalBar > 0 && (lastSignalBar - i) < InpMinBarsGap) continue;
+
+      // Anti-overtrade: per-day cap
+      MqlDateTime mdt; TimeToStruct(time[i], mdt);
+      datetime dayStart = StructToTime(mdt) - mdt.hour*3600 - mdt.min*60 - mdt.sec;
+      if(dayStart != currentDay)
+        {
+         currentDay   = dayStart;
+         signalsToday = 0;
+        }
+      if(InpMaxSignalsPerDay > 0 && signalsToday >= InpMaxSignalsPerDay) continue;
 
       // Plot arrow at bar with offset for visibility
       double offset = InpArrowOffsetPts * _Point;
@@ -460,6 +475,7 @@ int OnCalculate(const int rates_total,
          DrawTradeLevels(time[i], "BUY", c, sl, tp, clrLime);
          RaiseAlert(time[i], "BUY", c, sl, tp, buyScore);
          lastSignalBar = i;
+         signalsToday++;
          cntBuy++;
         }
       else if(sellOK)
@@ -470,6 +486,7 @@ int OnCalculate(const int rates_total,
          DrawTradeLevels(time[i], "SELL", c, sl, tp, clrRed);
          RaiseAlert(time[i], "SELL", c, sl, tp, sellScore);
          lastSignalBar = i;
+         signalsToday++;
          cntSell++;
         }
      }
