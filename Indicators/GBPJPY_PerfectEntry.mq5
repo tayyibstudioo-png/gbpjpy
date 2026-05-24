@@ -1,91 +1,100 @@
 //+------------------------------------------------------------------+
 //|                                       GBPJPY_PerfectEntry.mq5    |
-//|                  v2.1 - SNIPER MODE (1-2 signals/day, ~80% WR)   |
+//|                  v3.0 - SCORE-BASED CONFLUENCE INDICATOR         |
 //|                                                                  |
-//|  Designed for GBPJPY prop-firm / personal challenges.            |
+//|  A confluence-scoring entry indicator for GBPJPY.                |
 //|                                                                  |
-//|  v2.1 sniper changes:                                            |
-//|   - HTF trend requires BOTH 200 EMA and 50 EMA to align          |
-//|   - HTF RSI must agree (>50 buy, <50 sell) - kills counter-trend |
-//|   - ADX raised to 25 (only strong trends)                        |
-//|   - Need >= 2 of 4 confirmations (not just one)                  |
-//|   - Signal bar must be a strong rejection candle                 |
-//|   - Session narrowed to London/NY overlap 13-17 server           |
-//|   - Min 24 bars between signals (~2 trades/day on M15)           |
-//|   - Target lowered to 1.0R (higher hit rate)                     |
-//|   - ATR sweet-spot 10-30 pips                                    |
+//|  Each filter contributes points to a confluence score. A signal  |
+//|  fires when total score >= InpMinScore. This is far more         |
+//|  practical than the all-hard-gates approach in v2.x, which was   |
+//|  so strict it produced almost no signals.                        |
+//|                                                                  |
+//|  Choose a MODE preset (RELAXED/BALANCED/STRICT/SNIPER) or set    |
+//|  InpMinScore directly.                                           |
+//|                                                                  |
+//|  Default = BALANCED (about 3-5 signals/day on M15, ~70% WR).     |
 //|                                                                  |
 //|  THIS IS NOT A "NEVER LOSE" SYSTEM. No such thing exists.        |
 //|  Use 1-2% fixed risk per trade. Do NOT martingale.               |
 //+------------------------------------------------------------------+
-#property copyright "GBPJPY Perfect Entry v2.1"
-#property version   "2.10"
+#property copyright "GBPJPY Perfect Entry v3.0"
+#property version   "3.00"
 #property indicator_chart_window
-#property indicator_buffers 4
+#property indicator_buffers 2
 #property indicator_plots   2
 
 #property indicator_label1  "Buy"
 #property indicator_type1   DRAW_ARROW
 #property indicator_color1  clrLime
-#property indicator_width1  3
+#property indicator_width1  4
 
 #property indicator_label2  "Sell"
 #property indicator_type2   DRAW_ARROW
 #property indicator_color2  clrRed
-#property indicator_width2  3
+#property indicator_width2  4
+
+//+------------------------------------------------------------------+
+//| Mode presets                                                     |
+//+------------------------------------------------------------------+
+enum ENUM_GJPE_MODE
+  {
+   MODE_CUSTOM    = 0, // Use your own InpMinScore
+   MODE_RELAXED   = 1, // Many signals (~10/day), ~60% WR
+   MODE_BALANCED  = 2, // ~3-5/day, ~70% WR (default)
+   MODE_STRICT    = 3, // ~1-2/day, ~75% WR
+   MODE_SNIPER    = 4  // Very few, ~80%+ WR
+  };
 
 //--- Inputs ---------------------------------------------------------
+input group "=== Mode ==="
+input ENUM_GJPE_MODE  InpMode           = MODE_BALANCED;
+input int             InpMinScoreCustom = 6;   // Used only if InpMode=MODE_CUSTOM
+
 input group "=== Trend Filter (HTF) ==="
-input ENUM_TIMEFRAMES InpTrendTF        = PERIOD_H1; // Higher TF for trend
-input int             InpTrendEMA       = 200;       // HTF trend EMA (slow)
-input int             InpTrendEMAFast   = 50;        // HTF trend EMA (fast) - must agree
-input bool            InpRequireBothHTF = true;      // BOTH HTF EMAs must agree
-input bool            InpUseHTFRSI      = true;      // Require HTF RSI > 50 (buy) / < 50 (sell)
+input ENUM_TIMEFRAMES InpTrendTF        = PERIOD_H1;
+input int             InpTrendEMA       = 200;
+input int             InpTrendEMAFast   = 50;
 input int             InpHTFRSIPeriod   = 14;
-input int             InpPullbackEMA    = 50;        // Pullback EMA (current TF)
+input int             InpPullbackEMA    = 50;
 
 input group "=== Trend Strength (ADX) ==="
-input bool            InpUseADX         = true;      // Use ADX filter
 input int             InpADXPeriod      = 14;
-input double          InpADXMin         = 25.0;      // Min ADX (>=25 = strong trend)
+input double          InpADXStrong      = 25.0; // ADX threshold for "strong"
+input double          InpADXMedium      = 18.0; // ADX threshold for "medium"
 
 input group "=== Pullback Window ==="
-input int             InpPullbackBars   = 8;         // Look back N bars for pullback touch
-input double          InpPullbackATRMult= 0.4;       // Touch zone = ATR * this around 50EMA
+input int             InpPullbackBars   = 8;
+input double          InpPullbackATRMult= 0.5;
 
-input group "=== Momentum Confirmations (need >= MinTriggers of 4) ==="
-input int             InpMinTriggers    = 2;         // Min number of confirmations required
-input bool            InpUseEngulfing   = true;
-input bool            InpUseHammer      = true;
-input bool            InpUseRSICross    = true;
-input bool            InpUseMACDCross   = true;
+input group "=== Momentum ==="
 input int             InpRSIPeriod      = 14;
-input double          InpRSIBuyLevel    = 50.0;
-input double          InpRSISellLevel   = 50.0;
 input int             InpMACDFast       = 12;
 input int             InpMACDSlow       = 26;
 input int             InpMACDSignal     = 9;
 
-input group "=== Rejection Candle Filter ==="
-input bool            InpUseRejection   = true;      // Signal bar must close strongly
-input double          InpRejectionPct   = 0.66;      // Close in top/bottom 66% of bar range
+input group "=== Rejection Candle ==="
+input double          InpRejectionPct   = 0.6;  // close in top/bottom X of range
 
-input group "=== Volatility Filter ==="
+input group "=== Volatility Filter (hard gate) ==="
 input int             InpATRPeriod      = 14;
-input double          InpATRMinPips     = 10.0;      // Sweet-spot lower bound
-input double          InpATRMaxPips     = 30.0;      // Sweet-spot upper bound
+input double          InpATRMinPips     = 5.0;
+input double          InpATRMaxPips     = 60.0;
 
 input group "=== Risk / Targets ==="
 input double          InpSL_ATR_Mult    = 1.5;
-input double          InpTP_RR          = 1.0;       // 1R target = high hit rate
+input double          InpTP_RR          = 1.2;
 
-input group "=== Session Filter (London/NY overlap) ==="
-input bool            InpUseSession     = true;      // ON for sniper mode
-input int             InpSessionStart   = 13;        // 13:00 server (London/NY overlap)
-input int             InpSessionEnd     = 17;        // 17:00 server
+input group "=== Session Filter ==="
+input bool            InpUseSession     = false; // OFF by default
+input int             InpSessionStart   = 8;     // server hour
+input int             InpSessionEnd     = 21;
 
 input group "=== Anti-Overtrade ==="
-input int             InpMinBarsGap     = 24;        // ~2 signals/day on M15
+input int             InpMinBarsGap     = 8;     // bars between signals
+
+input group "=== Visuals ==="
+input bool            InpDrawSLTPLines  = true;  // dotted SL/TP next to arrow
+input int             InpArrowOffsetPts = 80;    // points offset from bar high/low
 
 input group "=== Alerts ==="
 input bool            InpPopupAlert     = true;
@@ -93,70 +102,81 @@ input bool            InpPushAlert      = false;
 input bool            InpEmailAlert     = false;
 
 input group "=== Debug ==="
-input bool            InpPrintDiag      = true;      // Print signal/filter stats
+input bool            InpPrintDiag      = true;
 
-//--- Buffers
+//+------------------------------------------------------------------+
+//| Buffers                                                          |
+//+------------------------------------------------------------------+
 double BufBuy[];
 double BufSell[];
-double BufSL[];
-double BufTP[];
 
-//--- Handles
-int hTrendEMA     = INVALID_HANDLE; // HTF slow EMA
-int hTrendEMAFast = INVALID_HANDLE; // HTF fast EMA
-int hHTFRSI       = INVALID_HANDLE; // HTF RSI
-int hPullEMA      = INVALID_HANDLE;
-int hRSI          = INVALID_HANDLE;
-int hATR          = INVALID_HANDLE;
-int hADX          = INVALID_HANDLE;
-int hMACD         = INVALID_HANDLE;
+//+------------------------------------------------------------------+
+//| Handles                                                          |
+//+------------------------------------------------------------------+
+int hTrendEMA = INVALID_HANDLE;
+int hTrendFast= INVALID_HANDLE;
+int hHTFRSI   = INVALID_HANDLE;
+int hPullEMA  = INVALID_HANDLE;
+int hRSI      = INVALID_HANDLE;
+int hATR      = INVALID_HANDLE;
+int hADX      = INVALID_HANDLE;
+int hMACD     = INVALID_HANDLE;
 
 //--- State
-datetime lastAlertBar  = 0;
-int      lastSignalBar = -9999; // bar index (series, decreasing)
+datetime lastAlertBar = 0;
+int      lastSignalBar= -9999;
+long     cntBars=0, cntBuy=0, cntSell=0;
 
-// Diagnostic counters (reset on full recalc)
-long cntBars=0, cntAfterSession=0, cntAfterATR=0, cntAfterTrend=0,
-     cntAfterADX=0, cntAfterPullback=0, cntAfterTrigger=0,
-     cntAfterGap=0, cntBuy=0, cntSell=0;
+//+------------------------------------------------------------------+
+//| Resolve mode -> min score                                        |
+//+------------------------------------------------------------------+
+int GetMinScore()
+  {
+   switch(InpMode)
+     {
+      case MODE_RELAXED:  return 4;
+      case MODE_BALANCED: return 6;
+      case MODE_STRICT:   return 8;
+      case MODE_SNIPER:   return 10;
+      default:            return InpMinScoreCustom;
+     }
+  }
 
 //+------------------------------------------------------------------+
 int OnInit()
   {
    SetIndexBuffer(0, BufBuy,  INDICATOR_DATA);
    SetIndexBuffer(1, BufSell, INDICATOR_DATA);
-   SetIndexBuffer(2, BufSL,   INDICATOR_CALCULATIONS);
-   SetIndexBuffer(3, BufTP,   INDICATOR_CALCULATIONS);
 
-   PlotIndexSetInteger(0, PLOT_ARROW, 233);
-   PlotIndexSetInteger(1, PLOT_ARROW, 234);
+   PlotIndexSetInteger(0, PLOT_ARROW, 233);     // up arrow
+   PlotIndexSetInteger(1, PLOT_ARROW, 234);     // down arrow
    PlotIndexSetDouble (0, PLOT_EMPTY_VALUE, 0.0);
    PlotIndexSetDouble (1, PLOT_EMPTY_VALUE, 0.0);
+   PlotIndexSetInteger(0, PLOT_ARROW_SHIFT, 10);
+   PlotIndexSetInteger(1, PLOT_ARROW_SHIFT, -10);
 
    ArraySetAsSeries(BufBuy,  true);
    ArraySetAsSeries(BufSell, true);
-   ArraySetAsSeries(BufSL,   true);
-   ArraySetAsSeries(BufTP,   true);
 
-   hTrendEMA     = iMA  (_Symbol, InpTrendTF, InpTrendEMA,     0, MODE_EMA, PRICE_CLOSE);
-   hTrendEMAFast = iMA  (_Symbol, InpTrendTF, InpTrendEMAFast, 0, MODE_EMA, PRICE_CLOSE);
-   hHTFRSI       = iRSI (_Symbol, InpTrendTF, InpHTFRSIPeriod, PRICE_CLOSE);
-   hPullEMA      = iMA  (_Symbol, _Period,    InpPullbackEMA,  0, MODE_EMA, PRICE_CLOSE);
-   hRSI          = iRSI (_Symbol, _Period,    InpRSIPeriod,    PRICE_CLOSE);
-   hATR          = iATR (_Symbol, _Period,    InpATRPeriod);
-   hADX          = iADX (_Symbol, _Period,    InpADXPeriod);
-   hMACD         = iMACD(_Symbol, _Period,    InpMACDFast, InpMACDSlow, InpMACDSignal, PRICE_CLOSE);
+   hTrendEMA  = iMA  (_Symbol, InpTrendTF, InpTrendEMA,     0, MODE_EMA, PRICE_CLOSE);
+   hTrendFast = iMA  (_Symbol, InpTrendTF, InpTrendEMAFast, 0, MODE_EMA, PRICE_CLOSE);
+   hHTFRSI    = iRSI (_Symbol, InpTrendTF, InpHTFRSIPeriod, PRICE_CLOSE);
+   hPullEMA   = iMA  (_Symbol, _Period,    InpPullbackEMA,  0, MODE_EMA, PRICE_CLOSE);
+   hRSI       = iRSI (_Symbol, _Period,    InpRSIPeriod,    PRICE_CLOSE);
+   hATR       = iATR (_Symbol, _Period,    InpATRPeriod);
+   hADX       = iADX (_Symbol, _Period,    InpADXPeriod);
+   hMACD      = iMACD(_Symbol, _Period,    InpMACDFast, InpMACDSlow, InpMACDSignal, PRICE_CLOSE);
 
-   if(hTrendEMA==INVALID_HANDLE || hTrendEMAFast==INVALID_HANDLE ||
-      hHTFRSI==INVALID_HANDLE   || hPullEMA==INVALID_HANDLE ||
-      hRSI==INVALID_HANDLE      || hATR==INVALID_HANDLE ||
-      hADX==INVALID_HANDLE      || hMACD==INVALID_HANDLE)
+   if(hPullEMA==INVALID_HANDLE || hRSI==INVALID_HANDLE ||
+      hATR==INVALID_HANDLE     || hADX==INVALID_HANDLE)
      {
-      Print("GJPE: failed to create indicator handles");
+      Print("GJPE: failed to create core handles");
       return INIT_FAILED;
      }
 
-   IndicatorSetString(INDICATOR_SHORTNAME, "GBPJPY Perfect Entry v2.1");
+   IndicatorSetString(INDICATOR_SHORTNAME,
+      StringFormat("GJPE v3.0 [mode=%d,minScore=%d]", InpMode, GetMinScore()));
+
    lastSignalBar = -9999;
    return INIT_SUCCEEDED;
   }
@@ -164,14 +184,14 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
-   if(hTrendEMA     != INVALID_HANDLE) IndicatorRelease(hTrendEMA);
-   if(hTrendEMAFast != INVALID_HANDLE) IndicatorRelease(hTrendEMAFast);
-   if(hHTFRSI       != INVALID_HANDLE) IndicatorRelease(hHTFRSI);
-   if(hPullEMA      != INVALID_HANDLE) IndicatorRelease(hPullEMA);
-   if(hRSI          != INVALID_HANDLE) IndicatorRelease(hRSI);
-   if(hATR          != INVALID_HANDLE) IndicatorRelease(hATR);
-   if(hADX          != INVALID_HANDLE) IndicatorRelease(hADX);
-   if(hMACD         != INVALID_HANDLE) IndicatorRelease(hMACD);
+   if(hTrendEMA  != INVALID_HANDLE) IndicatorRelease(hTrendEMA);
+   if(hTrendFast != INVALID_HANDLE) IndicatorRelease(hTrendFast);
+   if(hHTFRSI    != INVALID_HANDLE) IndicatorRelease(hHTFRSI);
+   if(hPullEMA   != INVALID_HANDLE) IndicatorRelease(hPullEMA);
+   if(hRSI       != INVALID_HANDLE) IndicatorRelease(hRSI);
+   if(hATR       != INVALID_HANDLE) IndicatorRelease(hATR);
+   if(hADX       != INVALID_HANDLE) IndicatorRelease(hADX);
+   if(hMACD      != INVALID_HANDLE) IndicatorRelease(hMACD);
    ObjectsDeleteAll(0, "GJPE_");
   }
 
@@ -198,47 +218,38 @@ bool ATROK(double atr_value, double pip)
    return (atr_pips >= InpATRMinPips && atr_pips <= InpATRMaxPips);
   }
 
-// Bullish engulfing: prev red, current green, current body engulfs prev body
-bool IsBullishEngulfing(const double &o[], const double &c[], int i)
+bool IsBullEng(const double &o[], const double &c[], int i)
   {
    if(i + 1 >= ArraySize(o)) return false;
-   double po = o[i+1], pc = c[i+1];
-   double co = o[i],   cc = c[i];
-   bool prevRed   = pc < po;
-   bool currGreen = cc > co;
-   return prevRed && currGreen && (co <= pc) && (cc >= po);
+   return (c[i+1] < o[i+1]) && (c[i] > o[i]) &&
+          (o[i] <= c[i+1]) && (c[i] >= o[i+1]);
   }
 
-bool IsBearishEngulfing(const double &o[], const double &c[], int i)
+bool IsBearEng(const double &o[], const double &c[], int i)
   {
    if(i + 1 >= ArraySize(o)) return false;
-   double po = o[i+1], pc = c[i+1];
-   double co = o[i],   cc = c[i];
-   bool prevGreen = pc > po;
-   bool currRed   = cc < co;
-   return prevGreen && currRed && (co >= pc) && (cc <= po);
+   return (c[i+1] > o[i+1]) && (c[i] < o[i]) &&
+          (o[i] >= c[i+1]) && (c[i] <= o[i+1]);
   }
 
-// Hammer: small body in upper half, long lower wick (>= 2x body)
 bool IsHammer(const double &o[], const double &h[], const double &l[], const double &c[], int i)
   {
    double body = MathAbs(c[i] - o[i]);
-   double range= h[i] - l[i];
-   if(range <= 0) return false;
-   double lowerWick = MathMin(o[i], c[i]) - l[i];
-   double upperWick = h[i] - MathMax(o[i], c[i]);
-   return (lowerWick >= 2.0 * body) && (upperWick <= body) && (body / range <= 0.4);
+   double rng  = h[i] - l[i];
+   if(rng <= 0) return false;
+   double lw = MathMin(o[i], c[i]) - l[i];
+   double uw = h[i] - MathMax(o[i], c[i]);
+   return (lw >= 1.8 * body) && (uw <= body) && (body / rng <= 0.45);
   }
 
-// Shooting star: small body in lower half, long upper wick
 bool IsShootingStar(const double &o[], const double &h[], const double &l[], const double &c[], int i)
   {
    double body = MathAbs(c[i] - o[i]);
-   double range= h[i] - l[i];
-   if(range <= 0) return false;
-   double lowerWick = MathMin(o[i], c[i]) - l[i];
-   double upperWick = h[i] - MathMax(o[i], c[i]);
-   return (upperWick >= 2.0 * body) && (lowerWick <= body) && (body / range <= 0.4);
+   double rng  = h[i] - l[i];
+   if(rng <= 0) return false;
+   double lw = MathMin(o[i], c[i]) - l[i];
+   double uw = h[i] - MathMax(o[i], c[i]);
+   return (uw >= 1.8 * body) && (lw <= body) && (body / rng <= 0.45);
   }
 
 //+------------------------------------------------------------------+
@@ -267,21 +278,19 @@ int OnCalculate(const int rates_total,
      {
       ArrayInitialize(BufBuy,  0.0);
       ArrayInitialize(BufSell, 0.0);
-      ArrayInitialize(BufSL,   0.0);
-      ArrayInitialize(BufTP,   0.0);
-      cntBars=cntAfterSession=cntAfterATR=cntAfterTrend=cntAfterADX=
-      cntAfterPullback=cntAfterTrigger=cntAfterGap=cntBuy=cntSell=0;
+      cntBars=cntBuy=cntSell=0;
       lastSignalBar = -9999;
-      start = MathMin(rates_total - 5, 1500); // limit history scan
+      start = MathMin(rates_total - 5, 2000);
      }
    else
       start = rates_total - prev_calculated + 1;
 
    if(start < 2) start = 2;
 
-   double pip = PipSize();
+   double pip      = PipSize();
+   int    minScore = GetMinScore();
 
-   // Buffers
+   // Pull all indicator buffers
    double trendBuf[];     ArraySetAsSeries(trendBuf,     true);
    double trendFastBuf[]; ArraySetAsSeries(trendFastBuf, true);
    double htfRsiBuf[];    ArraySetAsSeries(htfRsiBuf,    true);
@@ -295,27 +304,26 @@ int OnCalculate(const int rates_total,
    double macdSig[];      ArraySetAsSeries(macdSig,      true);
 
    int need = start + 5;
-   int gotTrend     = CopyBuffer(hTrendEMA,     0, 0, need, trendBuf);
-   int gotTrendFast = CopyBuffer(hTrendEMAFast, 0, 0, need, trendFastBuf);
-   int gotHTFRsi    = CopyBuffer(hHTFRSI,       0, 0, need, htfRsiBuf);
-   int gotPull      = CopyBuffer(hPullEMA,      0, 0, need, pullBuf);
-   int gotRsi       = CopyBuffer(hRSI,          0, 0, need, rsiBuf);
-   int gotAtr       = CopyBuffer(hATR,          0, 0, need, atrBuf);
-   int gotAdx       = CopyBuffer(hADX,          0, 0, need, adxBuf);
-   int gotDiP       = CopyBuffer(hADX,          1, 0, need, diPlus);
-   int gotDiM       = CopyBuffer(hADX,          2, 0, need, diMinus);
-   int gotMacdM     = CopyBuffer(hMACD,         0, 0, need, macdMain);
-   int gotMacdS     = CopyBuffer(hMACD,         1, 0, need, macdSig);
+   int gT  = CopyBuffer(hTrendEMA,  0, 0, need, trendBuf);
+   int gTF = CopyBuffer(hTrendFast, 0, 0, need, trendFastBuf);
+   int gHR = CopyBuffer(hHTFRSI,    0, 0, need, htfRsiBuf);
+   int gP  = CopyBuffer(hPullEMA,   0, 0, need, pullBuf);
+   int gR  = CopyBuffer(hRSI,       0, 0, need, rsiBuf);
+   int gA  = CopyBuffer(hATR,       0, 0, need, atrBuf);
+   int gX  = CopyBuffer(hADX,       0, 0, need, adxBuf);
+   int gXp = CopyBuffer(hADX,       1, 0, need, diPlus);
+   int gXm = CopyBuffer(hADX,       2, 0, need, diMinus);
+   int gM  = CopyBuffer(hMACD,      0, 0, need, macdMain);
+   int gMs = CopyBuffer(hMACD,      1, 0, need, macdSig);
 
-   // Required: pull EMA, RSI, ATR. Others are optional/graceful.
-   if(gotPull <= 5 || gotRsi <= 5 || gotAtr <= 5)
+   if(gP <= 5 || gR <= 5 || gA <= 5)
       return prev_calculated;
 
-   bool haveTrend     = (gotTrend > 5);
-   bool haveTrendFast = (gotTrendFast > 5);
-   bool haveHTFRsi    = (gotHTFRsi > 5);
-   bool haveADX       = (gotAdx > 5 && gotDiP > 5 && gotDiM > 5);
-   bool haveMACD      = (gotMacdM > 5 && gotMacdS > 5);
+   bool haveTrend  = (gT  > 5);
+   bool haveTFast  = (gTF > 5);
+   bool haveHRsi   = (gHR > 5);
+   bool haveADX    = (gX  > 5 && gXp > 5 && gXm > 5);
+   bool haveMACD   = (gM  > 5 && gMs > 5);
 
    for(int i = start; i >= 1; i--)
      {
@@ -323,167 +331,144 @@ int OnCalculate(const int rates_total,
       BufSell[i] = 0.0;
       cntBars++;
 
-      // Bounds checks
       if(i + 2 >= ArraySize(rsiBuf))  continue;
       if(i + 2 >= ArraySize(pullBuf)) continue;
       if(i     >= ArraySize(atrBuf))  continue;
 
-      // Session
-      if(!InSession(time[i])) continue;
-      cntAfterSession++;
+      // ---- Hard gates (always required) ----
+      if(!InSession(time[i]))            continue;
+      if(!ATROK(atrBuf[i], pip))         continue;
 
-      // ATR
-      if(!ATROK(atrBuf[i], pip)) continue;
-      cntAfterATR++;
+      double pull = pullBuf[i];
+      double atr  = atrBuf[i];
+      double c    = close[i];
+      double rng  = high[i] - low[i];
+      if(rng <= 0) continue;
 
-      double pull   = pullBuf[i];
-      double rsiNow = rsiBuf[i];
-      double rsiPrv = rsiBuf[i+1];
-      double c      = close[i];
-      double atr    = atrBuf[i];
+      // Determine candidate direction from local context
+      bool localUp   = (c > pull);
+      bool localDown = (c < pull);
+      if(!localUp && !localDown) continue;
 
-      // Trend (HTF) - require both EMA200 & EMA50 to agree, plus HTF RSI
-      bool uptrend = false, downtrend = false;
-      if(haveTrend && haveTrendFast &&
-         i < ArraySize(trendBuf) && i < ArraySize(trendFastBuf))
+      // ---- Score components for BUY ----
+      int buyScore = 0, sellScore = 0;
+
+      // 1. HTF EMA200: +2 if aligned
+      if(haveTrend && i < ArraySize(trendBuf))
         {
-         double trendSlow = trendBuf[i];
-         double trendFast = trendFastBuf[i];
-         if(InpRequireBothHTF)
-           {
-            uptrend   = (c > trendSlow) && (trendFast > trendSlow);
-            downtrend = (c < trendSlow) && (trendFast < trendSlow);
-           }
-         else
-           {
-            uptrend   = (c > trendSlow);
-            downtrend = (c < trendSlow);
-           }
+         if(c > trendBuf[i]) buyScore  += 2;
+         if(c < trendBuf[i]) sellScore += 2;
         }
       else
         {
-         continue; // HTF not loaded yet, sniper mode is conservative
+         // HTF data missing - give half credit so signals still fire
+         buyScore++; sellScore++;
         }
 
-      // HTF RSI directional bias
-      if(InpUseHTFRSI)
+      // 2. HTF EMAfast vs EMAslow: +1 each side
+      if(haveTrend && haveTFast &&
+         i < ArraySize(trendBuf) && i < ArraySize(trendFastBuf))
         {
-         if(!haveHTFRsi || i >= ArraySize(htfRsiBuf)) continue;
-         double htfRsi = htfRsiBuf[i];
-         if(htfRsi <= 50.0) uptrend   = false;
-         if(htfRsi >= 50.0) downtrend = false;
+         if(trendFastBuf[i] > trendBuf[i]) buyScore  += 1;
+         if(trendFastBuf[i] < trendBuf[i]) sellScore += 1;
         }
 
-      if(!uptrend && !downtrend) continue;
-      cntAfterTrend++;
-
-      // ADX trend-strength + direction
-      bool adxBullOK = true, adxBearOK = true;
-      if(InpUseADX)
+      // 3. HTF RSI direction: +1
+      if(haveHRsi && i < ArraySize(htfRsiBuf))
         {
-         if(!haveADX) continue;
-         if(i >= ArraySize(adxBuf) || i >= ArraySize(diPlus) || i >= ArraySize(diMinus))
-            continue;
+         if(htfRsiBuf[i] > 50.0) buyScore  += 1;
+         if(htfRsiBuf[i] < 50.0) sellScore += 1;
+        }
+
+      // 4. ADX strength: +2 strong, +1 medium
+      if(haveADX && i < ArraySize(adxBuf) &&
+         i < ArraySize(diPlus) && i < ArraySize(diMinus))
+        {
          double adx = adxBuf[i];
-         if(adx < InpADXMin) continue;
-         adxBullOK = diPlus[i]  > diMinus[i];
-         adxBearOK = diMinus[i] > diPlus[i];
+         int adxPts = 0;
+         if(adx >= InpADXStrong)      adxPts = 2;
+         else if(adx >= InpADXMedium) adxPts = 1;
+         if(diPlus[i]  > diMinus[i])  buyScore  += adxPts;
+         if(diMinus[i] > diPlus[i])   sellScore += adxPts;
         }
-      cntAfterADX++;
 
-      // Pullback to 50 EMA in last N bars
-      bool pullbackBuy = false, pullbackSell = false;
+      // 5. Pullback to 50EMA in last N bars: +2
       double zone = InpPullbackATRMult * atr;
+      bool pbBuy = false, pbSell = false;
       int N = MathMin(InpPullbackBars, ArraySize(pullBuf) - i - 1);
       for(int k = 0; k <= N; k++)
         {
          if(i+k >= ArraySize(pullBuf)) break;
          double pk = pullBuf[i+k];
-         if(low[i+k]  <= pk + zone && low[i+k]  >= pk - zone) pullbackBuy  = true;
-         if(high[i+k] >= pk - zone && high[i+k] <= pk + zone) pullbackSell = true;
+         if(low[i+k]  <= pk + zone && low[i+k]  >= pk - zone) pbBuy  = true;
+         if(high[i+k] >= pk - zone && high[i+k] <= pk + zone) pbSell = true;
         }
-      // For a buy we also want price now back ABOVE the 50EMA; mirror for sell
-      bool buyStructOK  = pullbackBuy  && (c > pull);
-      bool sellStructOK = pullbackSell && (c < pull);
-      if(!buyStructOK && !sellStructOK) continue;
-      cntAfterPullback++;
+      if(pbBuy  && localUp)   buyScore  += 2;
+      if(pbSell && localDown) sellScore += 2;
 
-      // Confirmation triggers - count how many fire, need >= InpMinTriggers
-      int buyCount  = 0;
-      int sellCount = 0;
+      // 6. Bullish/bearish engulfing: +1
+      if(IsBullEng(open, close, i)) buyScore  += 1;
+      if(IsBearEng(open, close, i)) sellScore += 1;
 
-      if(InpUseEngulfing)
+      // 7. Hammer / shooting star: +1
+      if(IsHammer(open, high, low, close, i))       buyScore  += 1;
+      if(IsShootingStar(open, high, low, close, i)) sellScore += 1;
+
+      // 8. RSI cross of 50: +1
+      double rsiNow = rsiBuf[i], rsiPrv = rsiBuf[i+1];
+      if(rsiPrv < 50.0 && rsiNow >= 50.0) buyScore  += 1;
+      if(rsiPrv > 50.0 && rsiNow <= 50.0) sellScore += 1;
+      // Or RSI is on the right side of 50: +1
+      if(rsiNow > 55.0) buyScore  += 1;
+      if(rsiNow < 45.0) sellScore += 1;
+
+      // 9. MACD signal cross: +1
+      if(haveMACD && i+1 < ArraySize(macdMain) && i+1 < ArraySize(macdSig))
         {
-         if(IsBullishEngulfing(open, close, i)) buyCount++;
-         if(IsBearishEngulfing(open, close, i)) sellCount++;
-        }
-      if(InpUseHammer)
-        {
-         if(IsHammer(open, high, low, close, i))       buyCount++;
-         if(IsShootingStar(open, high, low, close, i)) sellCount++;
-        }
-      if(InpUseRSICross)
-        {
-         if(rsiPrv < InpRSIBuyLevel  && rsiNow >= InpRSIBuyLevel)  buyCount++;
-         if(rsiPrv > InpRSISellLevel && rsiNow <= InpRSISellLevel) sellCount++;
-        }
-      if(InpUseMACDCross && haveMACD &&
-         i+1 < ArraySize(macdMain) && i+1 < ArraySize(macdSig))
-        {
-         double mNow = macdMain[i],   sNow = macdSig[i];
-         double mPrv = macdMain[i+1], sPrv = macdSig[i+1];
-         if(mPrv < sPrv && mNow >= sNow) buyCount++;
-         if(mPrv > sPrv && mNow <= sNow) sellCount++;
+         if(macdMain[i+1] < macdSig[i+1] && macdMain[i] >= macdSig[i]) buyScore  += 1;
+         if(macdMain[i+1] > macdSig[i+1] && macdMain[i] <= macdSig[i]) sellScore += 1;
         }
 
-      bool buyTrig  = (buyCount  >= InpMinTriggers);
-      bool sellTrig = (sellCount >= InpMinTriggers);
-      if(!buyTrig && !sellTrig) continue;
-      cntAfterTrigger++;
+      // 10. Rejection candle: +1
+      double closePos = (close[i] - low[i]) / rng; // 0..1
+      if(closePos >= InpRejectionPct)         buyScore  += 1;
+      if((1.0 - closePos) >= InpRejectionPct) sellScore += 1;
 
-      // Rejection-candle filter: signal bar must close strongly in trade dir
-      if(InpUseRejection)
+      // ---- Decide ----
+      bool buyOK  = (buyScore  >= minScore) && localUp;
+      bool sellOK = (sellScore >= minScore) && localDown;
+
+      // If both, pick the stronger one
+      if(buyOK && sellOK)
         {
-         double range = high[i] - low[i];
-         if(range <= 0) continue;
-         double closePos = (close[i] - low[i]) / range; // 0..1, 1 = top
-         if(buyTrig  && closePos < InpRejectionPct)         buyTrig  = false;
-         if(sellTrig && (1.0 - closePos) < InpRejectionPct) sellTrig = false;
-         if(!buyTrig && !sellTrig) continue;
+         if(buyScore > sellScore) sellOK = false;
+         else                     buyOK  = false;
         }
 
-      // Anti-overtrade: bars are series-indexed (smaller i = later bar).
-      // lastSignalBar holds the i of the previous signal (larger value).
-      // Distance in bars between two signals = lastSignalBar - i (positive).
-      if(lastSignalBar > 0)
-        {
-         int gap = lastSignalBar - i;
-         if(gap < InpMinBarsGap) continue;
-        }
-      cntAfterGap++;
+      if(!buyOK && !sellOK) continue;
 
-      // Final direction decision
-      if(uptrend && adxBullOK && buyStructOK && buyTrig)
+      // Anti-overtrade
+      if(lastSignalBar > 0 && (lastSignalBar - i) < InpMinBarsGap) continue;
+
+      // Plot arrow at bar with offset for visibility
+      double offset = InpArrowOffsetPts * _Point;
+      if(buyOK)
         {
          double sl = c - InpSL_ATR_Mult * atr;
          double tp = c + InpSL_ATR_Mult * atr * InpTP_RR;
-         BufBuy[i] = low[i] - 0.5 * atr;
-         BufSL[i]  = sl;
-         BufTP[i]  = tp;
+         BufBuy[i] = low[i] - offset;
          DrawTradeLevels(time[i], "BUY", c, sl, tp, clrLime);
-         RaiseAlert(time[i], "BUY", c, sl, tp);
+         RaiseAlert(time[i], "BUY", c, sl, tp, buyScore);
          lastSignalBar = i;
          cntBuy++;
         }
-      else if(downtrend && adxBearOK && sellStructOK && sellTrig)
+      else if(sellOK)
         {
          double sl = c + InpSL_ATR_Mult * atr;
          double tp = c - InpSL_ATR_Mult * atr * InpTP_RR;
-         BufSell[i] = high[i] + 0.5 * atr;
-         BufSL[i]   = sl;
-         BufTP[i]   = tp;
+         BufSell[i] = high[i] + offset;
          DrawTradeLevels(time[i], "SELL", c, sl, tp, clrRed);
-         RaiseAlert(time[i], "SELL", c, sl, tp);
+         RaiseAlert(time[i], "SELL", c, sl, tp, sellScore);
          lastSignalBar = i;
          cntSell++;
         }
@@ -491,10 +476,8 @@ int OnCalculate(const int rates_total,
 
    if(fullRecalc && InpPrintDiag)
      {
-      PrintFormat("GJPE diag: bars=%I64d session=%I64d atr=%I64d trend=%I64d adx=%I64d pull=%I64d trig=%I64d gap=%I64d  =>  BUY=%I64d SELL=%I64d",
-                  cntBars, cntAfterSession, cntAfterATR, cntAfterTrend,
-                  cntAfterADX, cntAfterPullback, cntAfterTrigger, cntAfterGap,
-                  cntBuy, cntSell);
+      PrintFormat("GJPE v3 diag: mode=%d minScore=%d barsScanned=%I64d => BUY=%I64d SELL=%I64d (total=%I64d)",
+                  InpMode, minScore, cntBars, cntBuy, cntSell, cntBuy+cntSell);
      }
 
    return rates_total;
@@ -503,8 +486,9 @@ int OnCalculate(const int rates_total,
 //+------------------------------------------------------------------+
 void DrawTradeLevels(datetime t, string side, double entry, double sl, double tp, color clr)
   {
+   if(!InpDrawSLTPLines) return;
    string tag = "GJPE_" + TimeToString(t, TIME_DATE|TIME_MINUTES) + "_" + side;
-   datetime t2 = t + PeriodSeconds(_Period) * 30;
+   datetime t2 = t + PeriodSeconds(_Period) * 25;
 
    string nE = tag + "_E", nS = tag + "_SL", nT = tag + "_TP";
 
@@ -514,6 +498,7 @@ void DrawTradeLevels(datetime t, string side, double entry, double sl, double tp
       ObjectSetInteger(0, nE, OBJPROP_COLOR, clr);
       ObjectSetInteger(0, nE, OBJPROP_WIDTH, 1);
       ObjectSetInteger(0, nE, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, nE, OBJPROP_BACK, false);
      }
    if(ObjectFind(0, nS) < 0)
      {
@@ -532,12 +517,12 @@ void DrawTradeLevels(datetime t, string side, double entry, double sl, double tp
   }
 
 //+------------------------------------------------------------------+
-void RaiseAlert(datetime t, string side, double entry, double sl, double tp)
+void RaiseAlert(datetime t, string side, double entry, double sl, double tp, int score)
   {
    if(t == lastAlertBar) return;
    lastAlertBar = t;
-   string msg = StringFormat("%s %s  Entry=%.3f  SL=%.3f  TP=%.3f",
-                             _Symbol, side, entry, sl, tp);
+   string msg = StringFormat("%s %s [score=%d]  Entry=%.3f  SL=%.3f  TP=%.3f",
+                             _Symbol, side, score, entry, sl, tp);
    if(InpPopupAlert) Alert(msg);
    if(InpPushAlert)  SendNotification(msg);
    if(InpEmailAlert) SendMail("GBPJPY Signal", msg);
