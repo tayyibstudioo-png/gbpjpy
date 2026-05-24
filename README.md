@@ -104,3 +104,77 @@ that's about **0.15 lots**. The lot scales with the account.
 - Live **stats panel** on the chart (today's signals, running win rate, RR).
 
 Just ask.
+
+---
+
+# GBPJPY S/R Break & Retest — MQL5 Indicator (v1.0)
+
+A second, **structure-based** indicator that lives in
+`Indicators/GBPJPY_SR_BreakRetest.mq5`. Designed to stack on top of
+**Perfect Entry** as a context layer: it draws the levels that matter,
+tells you when they break, and then waits for the textbook retest.
+
+## What it does
+
+1. Scans the last N bars for **swing pivots** (configurable left/right strength).
+2. **Clusters** nearby pivots into **zones**, weighted by touch count.
+   Two touches = a level. Three or more = a real rejection area.
+3. Watches each zone for a **decisive break** — a candle that closes
+   beyond the zone by `>= ATR x InpBreakATRMult`.
+4. After a break, watches the next `InpMaxRetestBars` bars for a
+   **retest**: price returns into the zone, then prints a rejection
+   candle (pin bar / engulfing) closing back in the breakout direction.
+5. On confirmation, drops a **green up-arrow (long)** or
+   **red down-arrow (short)** with a dotted entry / SL / TP, and
+   raises an alert.
+
+## Zone colors
+
+| Color | Meaning |
+|-------|---------|
+| Dark red | Active resistance (multiple swing-high rejections) |
+| Dark green | Active support (multiple swing-low rejections) |
+| Dodger blue | Resistance broken upward, now expected to act as support |
+| Dark orange | Support broken downward, now expected to act as resistance |
+| Label `[RETESTED]` | This zone has already produced a confirmed signal |
+
+## Suggested setup for the challenge
+
+The break-and-retest pattern is reliable on M15 / H1 GBPJPY.
+Recommended starting inputs:
+
+| Style | TF | `InpPivotLeft/Right` | `InpClusterATRMult` | `InpBreakATRMult` | `InpMaxRetestBars` |
+|-------|----|----------------------|---------------------|-------------------|-------------------|
+| Scalp | M5  | 3 / 3 | 0.30 | 0.30 | 30 |
+| Intraday (default) | **M15** | **4 / 4** | **0.45** | **0.40** | **60** |
+| Swing | H1  | 5 / 5 | 0.55 | 0.50 | 80 |
+
+Then turn `InpRequireRejection = true` (default) so only retests that
+print a real pin bar / engulfing fire arrows.
+
+## How to trade the arrows (challenge-friendly recipe)
+
+1. Wait for an arrow on a **closed** bar — never act on a forming candle.
+2. Entry = arrow bar close. SL = the dotted SL line. TP = the dotted TP line (1.5R default).
+3. Risk **fixed 1% of equity** per trade. No martingale, no doubling down.
+4. Skip the trade if a red-folder news event is within the next 30 min
+   (BOE / BOJ / US CPI / NFP / FOMC).
+5. Move SL to break-even at +0.5R, optionally close half at +1R.
+
+## Stacking with Perfect Entry
+
+Drop both indicators on the **same** GBPJPY M15 chart. The strongest
+setups are when:
+
+- A Perfect Entry arrow prints **inside or right next to** an active
+  S/R zone, **and**
+- The S/R zone has just been broken and is being retested.
+
+That's the A+ trade — confluence of trend, momentum, and structure.
+
+## Install
+
+1. Copy `Indicators/GBPJPY_SR_BreakRetest.mq5` into MT5's `MQL5/Indicators/` folder.
+2. Press **F4** in MT5 to open MetaEditor, then **F7** to compile (no errors expected).
+3. Drag the indicator on a GBPJPY chart. Press OK.
+4. Optionally drag `GBPJPY_PerfectEntry` on the same chart for the A+ stack.
